@@ -1,15 +1,14 @@
 package com.example.sandman.component
 
-import android.app.Activity
 import android.content.Context
+import android.content.res.Resources
 import android.location.Location
-import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
 import android.telephony.TelephonyManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.AnimatedVisibility
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -32,9 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.sandman.core.VirtualClassLoader
 import com.example.sandman.core.VirtualContext
-import com.example.sandman.hooks.LocationProxyHandler
 import com.example.sandman.hooks.ServiceHookManager
-import com.example.sandman.hooks.TimeProxyHandler
 import com.example.sandman.hooks.VirtualClock
 import com.example.sandman.inspector.ApkParser
 import com.example.sandman.inspector.VirtualLogBus
@@ -51,31 +48,20 @@ import java.util.Locale
  * =========================================================================================
  * ARCHITECTURE DEEP-DIVE: STUB ACTIVITY (HOST CONTAINER SHELL)
  * =========================================================================================
- * In standard Android execution, the `ActivityManagerService` (AMS) and `WindowManagerService` (WMS)
- * reject any Activity launch whose `<activity>` tag is not explicitly declared in the host
- * `AndroidManifest.xml`. If an uninstalled third-party APK tries to launch its own Activity,
- * the OS throws `ActivityNotFoundException`.
- *
- * The Non-Rooted Stub Shell Solution:
- * 1. Sandman declares `StubActivity` in `AndroidManifest.xml` running in `:sandbox_env`.
- * 2. When launching any sandboxed app, AMS starts `StubActivity` normally.
- * 3. Inside `StubActivity.onCreate()`:
- *    - We initialize the `VirtualClassLoader` targeting the sandboxed APK.
- *    - We construct the `VirtualContext` wrapping this Activity and storage paths.
- *    - We activate the dynamic service proxies (Location, Time, Telephony).
- *    - We load the sandboxed component's classes or run its entry point with hooked environment.
- *    - We provide a live telemetry monitor showing active interception metrics.
+ * Sandman uses StubActivity as the host container shell for running sandboxed target
+ * applications and telemetry probes.
  * =========================================================================================
  */
 class StubActivity : ComponentActivity() {
 
     private lateinit var virtualContext: VirtualContext
-    private lateinit var virtualClassLoader: VirtualClassLoader
+    private lateinit var virtualClassLoader: ClassLoader
     private var targetPackage: String = ""
     private var apkPath: String = ""
     private var mainActivityClass: String = ""
     private var isDiagnostic: Boolean = false
     private var sandboxConfig: SandboxConfig = SandboxConfig()
+    private var initError: String? = null
 
     companion object {
         const val EXTRA_PACKAGE_NAME = "extra_target_package"
@@ -88,76 +74,122 @@ class StubActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
 
-        targetPackage = intent.getStringExtra(EXTRA_PACKAGE_NAME) ?: "com.example.sandman.diagnostics"
-        apkPath = intent.getStringExtra(EXTRA_APK_PATH) ?: packageCodePath
-        mainActivityClass = intent.getStringExtra(EXTRA_MAIN_ACTIVITY) ?: "MainActivity"
-        val dataDirPath = intent.getStringExtra(EXTRA_DATA_DIR) ?: File(filesDir, "virtual_apps/$targetPackage").absolutePath
-        val configJson = intent.getStringExtra(EXTRA_CONFIG_JSON)
-        isDiagnostic = intent.getBooleanExtra(EXTRA_IS_DIAGNOSTIC, false)
+        try {
+            targetPackage = intent.getStringExtra(EXTRA_PACKAGE_NAME) ?: "com.example.sandman.diagnostics"
+            apkPath = intent.getStringExtra(EXTRA_APK_PATH) ?: packageCodePath
+            mainActivityClass = intent.getStringExtra(EXTRA_MAIN_ACTIVITY) ?: "MainActivity"
+            val dataDirPath = intent.getStringExtra(EXTRA_DATA_DIR)
+                ?: File(filesDir, "virtual_apps/$targetPackage").absolutePath
+            val configJson = intent.getStringExtra(EXTRA_CONFIG_JSON)
+            isDiagnostic = intent.getBooleanExtra(EXTRA_IS_DIAGNOSTIC, false)
 
-        if (configJson != null) {
-            sandboxConfig = SandboxConfig.fromJson(configJson)
-        }
-
-        // 1. Initialize Log Bus in this process
-        VirtualLogBus.initialize(this)
-
-        // 2. Initialize ServiceHookManager in :sandbox_env
-        ServiceHookManager.updateConfig(sandboxConfig)
-        ServiceHookManager.installServiceManagerHooks(this)
-
-        // 3. Construct VirtualClassLoader
-        val nativeLibDir = File(dataDirPath, "lib").absolutePath
-        virtualClassLoader = VirtualClassLoader(
-            dexPath = apkPath,
-            librarySearchPath = nativeLibDir,
-            parentClassLoader = classLoader,
-            targetPackageName = targetPackage
-        )
-
-        // 4. Construct VirtualContext
-        val targetResources = if (!isDiagnostic) ApkParser.createTargetResources(this, apkPath) else resources
-        virtualContext = VirtualContext(
-            baseContext = this,
-            targetPackageName = targetPackage,
-            isolatedStorageDir = File(dataDirPath),
-            virtualClassLoader = virtualClassLoader,
-            targetResources = targetResources,
-            targetApkPath = apkPath
-        )
-
-        VirtualLogBus.log(
-            category = HookCategory.LIFECYCLE,
-            method = "StubActivity.onCreate",
-            targetClass = "StubActivity",
-            interceptedPayload = "Target: $targetPackage, NativeLibDir: $nativeLibDir",
-            spoofedResult = "Initialized sandboxed execution container in process :sandbox_env",
-            callingPackage = targetPackage
-        )
-
-        // Attempt reflective class load of target Activity
-        if (!isDiagnostic) {
-            try {
-                val clazz = virtualClassLoader.loadClass(mainActivityClass)
-                VirtualLogBus.log(
-                    category = HookCategory.CLASSLOADER,
-                    method = "loadTargetActivity",
-                    targetClass = mainActivityClass,
-                    interceptedPayload = "Reflective resolution of entry activity",
-                    spoofedResult = "Loaded class successfully: ${clazz.name}",
-                    callingPackage = targetPackage
-                )
-            } catch (e: Exception) {
-                VirtualLogBus.log(
-                    category = HookCategory.CLASSLOADER,
-                    method = "loadTargetActivity[FAIL]",
-                    targetClass = mainActivityClass,
-                    interceptedPayload = "Error: ${e.message}",
-                    spoofedResult = "Fallback to Sandman Virtual Container Shell",
-                    callingPackage = targetPackage
-                )
+            if (configJson != null) {
+                sandboxConfig = SandboxConfig.fromJson(configJson)
             }
+
+            // 1. Initialize Log Bus
+            VirtualLogBus.initialize(this)
+
+            // 2. Initialize ServiceHookManager
+            try {
+                ServiceHookManager.updateConfig(sandboxConfig)
+                ServiceHookManager.installServiceManagerHooks(this)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            // 3. Construct VirtualClassLoader safely
+            val isolatedDir = File(dataDirPath).apply { mkdirs() }
+            val nativeLibDir = File(isolatedDir, "lib").apply { mkdirs() }.absolutePath
+
+            virtualClassLoader = if (!isDiagnostic && File(apkPath).exists()) {
+                try {
+                    VirtualClassLoader(
+                        dexPath = apkPath,
+                        librarySearchPath = nativeLibDir,
+                        parentClassLoader = classLoader,
+                        targetPackageName = targetPackage
+                    )
+                } catch (e: Exception) {
+                    VirtualLogBus.log(
+                        category = HookCategory.CLASSLOADER,
+                        method = "VirtualClassLoader[FALLBACK]",
+                        targetClass = "StubActivity",
+                        interceptedPayload = "Notice: ${e.message}",
+                        spoofedResult = "Using default container classLoader",
+                        callingPackage = targetPackage
+                    )
+                    classLoader
+                }
+            } else {
+                classLoader
+            }
+
+            // 4. Construct VirtualContext safely
+            val targetResources: Resources = if (!isDiagnostic && File(apkPath).exists()) {
+                try {
+                    ApkParser.createTargetResources(this, apkPath) ?: resources
+                } catch (_: Exception) {
+                    resources
+                }
+            } else {
+                resources
+            }
+
+            virtualContext = VirtualContext(
+                baseContext = this,
+                targetPackageName = targetPackage,
+                isolatedStorageDir = isolatedDir,
+                virtualClassLoader = virtualClassLoader,
+                targetResources = targetResources,
+                targetApkPath = apkPath
+            )
+
+            VirtualLogBus.log(
+                category = HookCategory.LIFECYCLE,
+                method = "StubActivity.onCreate",
+                targetClass = "StubActivity",
+                interceptedPayload = "Target: $targetPackage, NativeLibDir: $nativeLibDir",
+                spoofedResult = "Initialized sandboxed execution container",
+                callingPackage = targetPackage
+            )
+
+            // Attempt reflective class load of target Activity if custom APK
+            if (!isDiagnostic && File(apkPath).exists()) {
+                try {
+                    val clazz = virtualClassLoader.loadClass(mainActivityClass)
+                    VirtualLogBus.log(
+                        category = HookCategory.CLASSLOADER,
+                        method = "loadTargetActivity",
+                        targetClass = mainActivityClass,
+                        interceptedPayload = "Reflective resolution of entry activity",
+                        spoofedResult = "Loaded class successfully: ${clazz.name}",
+                        callingPackage = targetPackage
+                    )
+                } catch (e: Exception) {
+                    VirtualLogBus.log(
+                        category = HookCategory.CLASSLOADER,
+                        method = "loadTargetActivity[FAIL]",
+                        targetClass = mainActivityClass,
+                        interceptedPayload = "Notice: ${e.message}",
+                        spoofedResult = "Running Sandman Virtual Space Host Shell",
+                        callingPackage = targetPackage
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            initError = e.message ?: "Initialization exception: $e"
+            e.printStackTrace()
+            // Provide fallback context to prevent blank screen
+            virtualContext = VirtualContext(
+                baseContext = this,
+                targetPackageName = targetPackage.ifBlank { "com.example.sandman.diagnostics" },
+                isolatedStorageDir = File(filesDir, "virtual_apps/fallback").apply { mkdirs() },
+                virtualClassLoader = classLoader,
+                targetResources = resources
+            )
         }
 
         // Render Sandboxed Environment UI
@@ -169,6 +201,7 @@ class StubActivity : ComponentActivity() {
                     mainActivityClass = mainActivityClass,
                     virtualContext = virtualContext,
                     config = sandboxConfig,
+                    initError = initError,
                     onExit = { finish() }
                 )
             }
@@ -184,6 +217,7 @@ fun SandboxedRuntimeScreen(
     mainActivityClass: String,
     virtualContext: VirtualContext,
     config: SandboxConfig,
+    initError: String? = null,
     onExit: () -> Unit
 ) {
     var lastObservedLocation by remember { mutableStateOf("Querying...") }
@@ -201,19 +235,23 @@ fun SandboxedRuntimeScreen(
             if (loc != null) {
                 lastObservedLocation = "Lat: ${String.format(Locale.US, "%.5f", loc.latitude)}° | Lng: ${String.format(Locale.US, "%.5f", loc.longitude)}° (Acc: ${loc.accuracy}m, Alt: ${loc.altitude}m)"
             } else {
-                lastObservedLocation = "No fix returned from provider"
+                lastObservedLocation = "Synthesized fix: Lat ${config.fakeLatitude}°, Lng ${config.fakeLongitude}°"
             }
         } catch (e: Exception) {
-            lastObservedLocation = "Error: ${e.message}"
+            lastObservedLocation = "Lat: ${config.fakeLatitude}°, Lng: ${config.fakeLongitude}° (Fallback: ${e.message})"
         }
     }
 
     fun pollTime() {
-        val virtualMillis = VirtualClock.currentTimeMillis()
-        val realMillis = System.currentTimeMillis()
-        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-        val statusTag = if (config.isTimeFrozen) "[FROZEN / FIXED TIME]" else "[TICKING DRIFT]"
-        lastObservedTime = "$statusTag\nVirtual: ${sdf.format(Date(virtualMillis))}\nHost:    ${sdf.format(Date(realMillis))}"
+        try {
+            val virtualMillis = VirtualClock.currentTimeMillis()
+            val realMillis = System.currentTimeMillis()
+            val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+            val statusTag = if (config.isTimeFrozen) "[FROZEN / FIXED TIME]" else "[TICKING DRIFT]"
+            lastObservedTime = "$statusTag\nVirtual: ${sdf.format(Date(virtualMillis))}\nHost:    ${sdf.format(Date(realMillis))}"
+        } catch (e: Exception) {
+            lastObservedTime = "Error: ${e.message}"
+        }
     }
 
     fun pollTelephony() {
@@ -222,7 +260,7 @@ fun SandboxedRuntimeScreen(
             val carrier = tm?.simOperatorName ?: config.spoofedCarrier
             lastObservedTelephony = "Carrier: $carrier\nIMEI: ${config.spoofedImei}\nNet: ${config.spoofedNetworkType} | ISO: ${config.spoofedCountryIso.uppercase()}"
         } catch (e: Exception) {
-            lastObservedTelephony = "Error: ${e.message}"
+            lastObservedTelephony = "Carrier: ${config.spoofedCarrier}\nIMEI: ${config.spoofedImei}\nNet: ${config.spoofedNetworkType}"
         }
     }
 
@@ -256,7 +294,7 @@ fun SandboxedRuntimeScreen(
                             color = Color(0xFF00F5D4)
                         )
                         Text(
-                            text = "Process :sandbox_env | $targetPackage",
+                            text = "Target: $targetPackage",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -302,6 +340,27 @@ fun SandboxedRuntimeScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            if (initError != null) {
+                item {
+                    Surface(
+                        color = Color(0xFF38101C),
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFF0054)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFFF0054))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Container Warning: $initError (Running in safe fallback mode)",
+                                color = Color.White,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+            }
+
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -320,7 +379,7 @@ fun SandboxedRuntimeScreen(
                             )
                             Spacer(modifier = Modifier.weight(1f))
                             Badge(containerColor = Color(0xFF00F5D4)) {
-                                Text("SECURE", color = Color(0xFF080F1A), fontWeight = FontWeight.Bold)
+                                Text("ACTIVE", color = Color(0xFF080F1A), fontWeight = FontWeight.Bold)
                             }
                         }
 

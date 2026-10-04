@@ -35,15 +35,13 @@
             android:name="com.example.sandman.component.StubActivity"
             android:exported="false"
             android:label="Sandman Virtual Space"
-            android:process=":sandbox_env"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:theme="@style/Theme.MyApplication" />
 
         <!-- Stub Service: Background execution shell for sandboxed services -->
         <service
             android:name="com.example.sandman.component.StubService"
-            android:exported="false"
-            android:process=":sandbox_env" />
+            android:exported="false" />
 
     </application>
 

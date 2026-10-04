@@ -2,7 +2,9 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.sandman.core.VirtualContainer
 import com.example.sandman.hooks.VirtualClock
+import com.example.sandman.model.InstalledVirtualApp
 import com.example.sandman.model.SandboxConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -73,5 +75,24 @@ class ExampleRobolectricTest {
 
     assertEquals(specificFixedTime, fixedNow1)
     assertEquals(specificFixedTime, fixedNow2)
+  }
+
+  @Test
+  fun `verify virtual container launch execution`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val app = InstalledVirtualApp(
+      packageName = "com.example.sandman.diagnostics",
+      appName = "Diagnostics",
+      versionName = "1.0",
+      versionCode = 1,
+      apkPath = context.packageCodePath,
+      mainActivity = "MainActivity",
+      applicationClass = null,
+      permissions = emptyList(),
+      isolatedDataDir = context.filesDir.absolutePath,
+      isBuiltInDiagnostic = true
+    )
+    val launched = VirtualContainer.launchApp(context, app)
+    assertTrue(launched)
   }
 }

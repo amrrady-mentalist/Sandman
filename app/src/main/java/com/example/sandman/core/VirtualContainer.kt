@@ -252,26 +252,40 @@ object VirtualContainer {
         } catch (_: Exception) {}
     }
 
-    fun launchApp(context: Context, app: InstalledVirtualApp) {
+    fun launchApp(context: Context, app: InstalledVirtualApp): Boolean {
         VirtualLogBus.log(
             category = HookCategory.LIFECYCLE,
             method = "launchApp",
             targetClass = "VirtualContainer",
             interceptedPayload = "Target: ${app.packageName} -> Activity: ${app.mainActivity}",
-            spoofedResult = "Dispatching to StubActivity in process :sandbox_env",
+            spoofedResult = "Launching StubActivity sandbox container",
             callingPackage = app.packageName
         )
 
-        val intent = Intent(context, StubActivity::class.java).apply {
-            putExtra(StubActivity.EXTRA_PACKAGE_NAME, app.packageName)
-            putExtra(StubActivity.EXTRA_APK_PATH, app.apkPath)
-            putExtra(StubActivity.EXTRA_MAIN_ACTIVITY, app.mainActivity)
-            putExtra(StubActivity.EXTRA_DATA_DIR, app.isolatedDataDir)
-            putExtra(StubActivity.EXTRA_CONFIG_JSON, _currentConfig.value.toJson())
-            putExtra(StubActivity.EXTRA_IS_DIAGNOSTIC, app.isBuiltInDiagnostic)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        return try {
+            val intent = Intent(context, StubActivity::class.java).apply {
+                putExtra(StubActivity.EXTRA_PACKAGE_NAME, app.packageName)
+                putExtra(StubActivity.EXTRA_APK_PATH, app.apkPath)
+                putExtra(StubActivity.EXTRA_MAIN_ACTIVITY, app.mainActivity)
+                putExtra(StubActivity.EXTRA_DATA_DIR, app.isolatedDataDir)
+                putExtra(StubActivity.EXTRA_CONFIG_JSON, _currentConfig.value.toJson())
+                putExtra(StubActivity.EXTRA_IS_DIAGNOSTIC, app.isBuiltInDiagnostic)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            VirtualLogBus.log(
+                category = HookCategory.LIFECYCLE,
+                method = "launchApp[FAIL]",
+                targetClass = "VirtualContainer",
+                interceptedPayload = "Exception: ${e.message}",
+                spoofedResult = "Failed to start StubActivity",
+                callingPackage = app.packageName
+            )
+            false
         }
-        context.startActivity(intent)
     }
 
     fun deleteApp(context: Context, packageName: String) {

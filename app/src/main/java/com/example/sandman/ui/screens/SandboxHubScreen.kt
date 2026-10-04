@@ -256,8 +256,16 @@ fun SandboxHubScreen(
         items(installedApps) { app ->
             VirtualAppCard(
                 app = app,
-                onLaunch = { VirtualContainer.launchApp(context, app) },
-                onClearData = { VirtualContainer.clearAppData(context, app.packageName) },
+                onLaunch = {
+                    val launched = VirtualContainer.launchApp(context, app)
+                    if (!launched) {
+                        installStatusMessage = "Notice: Unable to launch container for ${app.appName}."
+                    }
+                },
+                onClearData = {
+                    VirtualContainer.clearAppData(context, app.packageName)
+                    installStatusMessage = "Purged sandbox storage cache for ${app.appName}."
+                },
                 onDelete = { appToDelete = app },
                 onViewDetails = { selectedAppForDetail = app }
             )
