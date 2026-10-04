@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import com.example.sandman.component.StubActivity
 import com.example.sandman.hooks.ServiceHookManager
+import com.example.sandman.hooks.VirtualClock
 import com.example.sandman.inspector.ApkParser
 import com.example.sandman.inspector.VirtualLogBus
 import com.example.sandman.model.HookCategory
@@ -23,30 +24,22 @@ import java.util.zip.ZipFile
 
 /**
  * =========================================================================================
- * ARCHITECTURE DEEP-DIVE: VIRTUAL CONTAINER ENGINE
+ * ARCHITECTURE DEEP-DIVE: VIRTUAL CONTAINER & MULTI-APP LIFECYCLE
  * =========================================================================================
- * The `VirtualContainer` is the central orchestration unit of Sandman.
- * It manages the lifecycle of sandboxed applications without host OS installation:
+ * In modern Android, apps installed via Google Play or `pm install` are allocated a unique
+ * Linux UID (e.g. `u0_a145`) and placed in `/data/app/<package>-<hash>/base.apk`.
  *
- * 1. APK Ingestion & Storage Provisioning:
- *    - Copies incoming APK to `/data/data/<host>/virtual_apps/<package_name>/base.apk`.
- *    - Extracts native `.so` dynamic libraries to `<package_name>/lib/<abi>/`.
- *    - Initializes private storage silos (`files`, `cache`, `databases`, `shared_prefs`).
- *
- * 2. Component Reflection & Manifest Analysis:
- *    - Reads application class names, launcher activity, and permissions without root.
- *
- * 3. Execution Pipeline:
- *    - Loads bytecode into `VirtualClassLoader`.
- *    - Hooks AOSP ServiceManager and framework binders via `ServiceHookManager`.
- *    - Dispatches execution to `StubActivity` shell.
+ * Sandman Virtual Space:
+ * 1. Maintains an isolated storage repository at `/data/data/.../virtual_apps/<package>/`.
+ * 2. Manages dynamic metadata, ClassLoader linkage, and system service proxy injection.
+ * 3. Launches applications and interactive sandboxed suites inside the secure host shell.
  * =========================================================================================
  */
 object VirtualContainer {
 
-    private const val PREFS_NAME = "sandman_virtual_container_prefs"
-    private const val KEY_INSTALLED_APPS = "installed_virtual_apps"
-    private const val KEY_CONFIG = "sandbox_config"
+    private const val PREFS_NAME = "sandman_virtual_space_prefs"
+    private const val KEY_CONFIG = "saved_sandbox_config"
+    private const val KEY_INSTALLED_APPS = "saved_installed_apps"
 
     private val _installedApps = MutableStateFlow<List<InstalledVirtualApp>>(emptyList())
     val installedApps: StateFlow<List<InstalledVirtualApp>> = _installedApps.asStateFlow()
@@ -54,27 +47,30 @@ object VirtualContainer {
     private val _currentConfig = MutableStateFlow(SandboxConfig())
     val currentConfig: StateFlow<SandboxConfig> = _currentConfig.asStateFlow()
 
-    private var isInitialized = false
-
     fun initialize(context: Context) {
-        if (isInitialized) return
-        isInitialized = true
-
         VirtualLogBus.initialize(context)
         loadSavedConfig(context)
         loadInstalledApps(context)
+        ensureBuiltInVirtualApps(context)
 
-        // Install system hooks in current process
+        // Install dynamic service proxy hooks
         ServiceHookManager.updateConfig(_currentConfig.value)
         ServiceHookManager.installServiceManagerHooks(context)
 
-        // Ensure built-in diagnostic target is present
-        ensureBuiltInDiagnosticApp(context)
+        VirtualLogBus.log(
+            category = HookCategory.LIFECYCLE,
+            method = "VirtualContainer.initialize",
+            targetClass = "VirtualContainer",
+            interceptedPayload = "Installed apps count: ${_installedApps.value.size}",
+            spoofedResult = "Virtual space runtime active and verified"
+        )
     }
 
     fun updateConfig(context: Context, newConfig: SandboxConfig) {
         _currentConfig.value = newConfig
+        VirtualClock.config = newConfig
         ServiceHookManager.updateConfig(newConfig)
+
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString(KEY_CONFIG, newConfig.toJson()).apply()
 
@@ -82,7 +78,7 @@ object VirtualContainer {
             category = HookCategory.AOSP_BINDER,
             method = "updateConfig",
             targetClass = "VirtualContainer",
-            interceptedPayload = "Config updated: Location=${newConfig.fakeLatitude},${newConfig.fakeLongitude}, TimeOffset=${newConfig.timeOffsetMillis}ms",
+            interceptedPayload = "Config updated: Location=${newConfig.fakeLatitude},${newConfig.fakeLongitude}, TimeOffset=${newConfig.timeOffsetMillis}ms, Frozen=${newConfig.isTimeFrozen}",
             spoofedResult = "Synced across virtualization engine"
         )
     }
@@ -150,38 +146,68 @@ object VirtualContainer {
         prefs.edit().putString(KEY_INSTALLED_APPS, arr.toString()).apply()
     }
 
-    private fun ensureBuiltInDiagnosticApp(context: Context) {
-        val pkg = "com.example.sandman.diagnostics"
-        val existing = _installedApps.value.firstOrNull { it.packageName == pkg }
-        if (existing == null) {
-            val virtualAppsRoot = File(context.filesDir, "virtual_apps")
-            val targetDir = File(virtualAppsRoot, pkg).apply { mkdirs() }
+    private fun ensureBuiltInVirtualApps(context: Context) {
+        val virtualAppsRoot = File(context.filesDir, "virtual_apps")
 
-            val diagnosticApp = InstalledVirtualApp(
-                packageName = pkg,
-                appName = "Sandman Telemetry Diagnostics",
-                versionName = "2.4.0",
-                versionCode = 240,
-                apkPath = context.packageCodePath, // Uses host APK code path
-                mainActivity = "com.example.sandman.component.DiagnosticsRunner",
-                applicationClass = null,
-                permissions = listOf(
-                    "android.permission.ACCESS_FINE_LOCATION",
-                    "android.permission.ACCESS_COARSE_LOCATION",
-                    "android.permission.READ_PHONE_STATE",
-                    "android.permission.INTERNET"
-                ),
-                isolatedDataDir = targetDir.absolutePath,
-                isBuiltInDiagnostic = true
+        val builtInTemplates = listOf(
+            Triple(
+                "com.example.sandman.georadar",
+                "GNSS Radar & Route Walker",
+                "com.example.sandman.component.GeoRadarRunner"
+            ),
+            Triple(
+                "com.example.sandman.webexplorer",
+                "Sandboxed Web & Map Explorer",
+                "com.example.sandman.component.WebExplorerRunner"
+            ),
+            Triple(
+                "com.example.sandman.timewarp",
+                "Chronos Time-Warp & Licensing",
+                "com.example.sandman.component.TimeWarpRunner"
+            ),
+            Triple(
+                "com.example.sandman.diagnostics",
+                "Sandman Telemetry Diagnostics",
+                "com.example.sandman.component.DiagnosticsRunner"
             )
+        )
 
-            _installedApps.value = listOf(diagnosticApp) + _installedApps.value
+        val currentList = _installedApps.value.toMutableList()
+        var modified = false
+
+        for ((pkg, name, entry) in builtInTemplates) {
+            if (currentList.none { it.packageName == pkg }) {
+                val targetDir = File(virtualAppsRoot, pkg).apply { mkdirs() }
+                val virtualApp = InstalledVirtualApp(
+                    packageName = pkg,
+                    appName = name,
+                    versionName = "2.5.0",
+                    versionCode = 250,
+                    apkPath = context.packageCodePath,
+                    mainActivity = entry,
+                    applicationClass = null,
+                    permissions = listOf(
+                        "android.permission.ACCESS_FINE_LOCATION",
+                        "android.permission.ACCESS_COARSE_LOCATION",
+                        "android.permission.READ_PHONE_STATE",
+                        "android.permission.INTERNET"
+                    ),
+                    isolatedDataDir = targetDir.absolutePath,
+                    isBuiltInDiagnostic = true
+                )
+                currentList.add(virtualApp)
+                modified = true
+            }
+        }
+
+        if (modified) {
+            _installedApps.value = currentList
             saveInstalledApps(context)
         }
     }
 
     /**
-     * Installs an uninstalled target APK from a content Uri (via File Picker) into the virtual sandbox.
+     * Installs an uninstalled target APK from a content Uri into the virtual sandbox.
      */
     suspend fun installApkFromUri(context: Context, apkUri: Uri): Result<InstalledVirtualApp> = withContext(Dispatchers.IO) {
         try {
@@ -199,18 +225,28 @@ object VirtualContainer {
             val packageName = tempParsed.packageName
             val virtualAppsRoot = File(context.filesDir, "virtual_apps")
             val appStorageDir = File(virtualAppsRoot, packageName).apply { mkdirs() }
-            val finalApkFile = File(appStorageDir, "base.apk")
+            val libDir = File(appStorageDir, "lib").apply { mkdirs() }
 
-            tempFile.copyTo(finalApkFile, overwrite = true)
+            // Permanent APK silo
+            val permanentApk = File(appStorageDir, "base.apk")
+            tempFile.copyTo(permanentApk, overwrite = true)
             tempFile.delete()
 
-            // Extract native .so libraries if present
-            val nativeLibDir = File(appStorageDir, "lib").apply { mkdirs() }
-            extractNativeLibraries(finalApkFile, nativeLibDir)
+            // Extract native shared libraries (.so)
+            extractNativeLibraries(permanentApk, libDir)
 
-            // Re-parse with permanent storage path
-            val installedApp = ApkParser.parseApk(context, finalApkFile, appStorageDir.absolutePath)
-                ?: return@withContext Result.failure(Exception("Failed to finalize installed virtual app"))
+            val installedApp = InstalledVirtualApp(
+                packageName = packageName,
+                appName = tempParsed.appName,
+                versionName = tempParsed.versionName,
+                versionCode = tempParsed.versionCode,
+                apkPath = permanentApk.absolutePath,
+                mainActivity = tempParsed.mainActivity,
+                applicationClass = tempParsed.applicationClass,
+                permissions = tempParsed.permissions,
+                isolatedDataDir = appStorageDir.absolutePath,
+                isBuiltInDiagnostic = false
+            )
 
             // Update state
             val currentList = _installedApps.value.filter { it.packageName != packageName }.toMutableList()
@@ -265,6 +301,7 @@ object VirtualContainer {
         return try {
             val intent = Intent(context, StubActivity::class.java).apply {
                 putExtra(StubActivity.EXTRA_PACKAGE_NAME, app.packageName)
+                putExtra(StubActivity.EXTRA_APP_NAME, app.appName)
                 putExtra(StubActivity.EXTRA_APK_PATH, app.apkPath)
                 putExtra(StubActivity.EXTRA_MAIN_ACTIVITY, app.mainActivity)
                 putExtra(StubActivity.EXTRA_DATA_DIR, app.isolatedDataDir)
@@ -300,31 +337,35 @@ object VirtualContainer {
         saveInstalledApps(context)
 
         VirtualLogBus.log(
-            category = HookCategory.STORAGE,
+            category = HookCategory.LIFECYCLE,
             method = "deleteApp",
             targetClass = "VirtualContainer",
-            interceptedPayload = "Purged sandbox storage for $packageName",
-            spoofedResult = "Isolated directory removed",
+            interceptedPayload = "Deleted container $packageName",
+            spoofedResult = "Purged all isolated storage and unlinked ClassLoader",
             callingPackage = packageName
         )
     }
 
     fun clearAppData(context: Context, packageName: String) {
         val app = _installedApps.value.firstOrNull { it.packageName == packageName } ?: return
-        val root = File(app.isolatedDataDir)
-        File(root, "files").deleteRecursively()
-        File(root, "cache").deleteRecursively()
-        File(root, "databases").deleteRecursively()
-        File(root, "files").mkdirs()
-        File(root, "cache").mkdirs()
-        File(root, "databases").mkdirs()
+        val dir = File(app.isolatedDataDir)
+        try {
+            File(dir, "files").deleteRecursively()
+            File(dir, "cache").deleteRecursively()
+            File(dir, "databases").deleteRecursively()
+            File(dir, "shared_prefs").deleteRecursively()
+            File(dir, "files").mkdirs()
+            File(dir, "cache").mkdirs()
+            File(dir, "databases").mkdirs()
+            File(dir, "shared_prefs").mkdirs()
+        } catch (_: Exception) {}
 
         VirtualLogBus.log(
             category = HookCategory.STORAGE,
             method = "clearAppData",
             targetClass = "VirtualContainer",
-            interceptedPayload = "Cleared sandbox cache and databases for $packageName",
-            spoofedResult = "Storage reset to clean state",
+            interceptedPayload = "Cleared data for $packageName",
+            spoofedResult = "Reset private filesystem storage silo",
             callingPackage = packageName
         )
     }

@@ -366,25 +366,34 @@ fun VirtualAppCard(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 // App Avatar Icon
+                val appIcon = when (app.packageName) {
+                    "com.example.sandman.georadar" -> Icons.Default.Navigation
+                    "com.example.sandman.webexplorer" -> Icons.Default.Language
+                    "com.example.sandman.timewarp" -> Icons.Default.Schedule
+                    "com.example.sandman.diagnostics" -> Icons.Default.Shield
+                    else -> Icons.Default.Android
+                }
+                val iconColor = when (app.packageName) {
+                    "com.example.sandman.georadar" -> NeonCyan
+                    "com.example.sandman.webexplorer" -> NeonAmber
+                    "com.example.sandman.timewarp" -> NeonGreen
+                    "com.example.sandman.diagnostics" -> NeonPink
+                    else -> NeonCyan
+                }
+
                 Box(
                     modifier = Modifier
                         .size(46.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(
-                            if (app.isBuiltInDiagnostic) NeonGreen.copy(alpha = 0.2f) else NeonCyan.copy(alpha = 0.2f)
-                        )
-                        .border(
-                            1.dp,
-                            if (app.isBuiltInDiagnostic) NeonGreen else NeonCyan,
-                            RoundedCornerShape(12.dp)
-                        ),
+                        .background(iconColor.copy(alpha = 0.2f))
+                        .border(1.dp, iconColor, RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = if (app.isBuiltInDiagnostic) Icons.Default.BuildCircle else Icons.Default.Android,
+                        imageVector = appIcon,
                         contentDescription = null,
-                        tint = if (app.isBuiltInDiagnostic) NeonGreen else NeonCyan,
-                        modifier = Modifier.size(28.dp)
+                        tint = iconColor,
+                        modifier = Modifier.size(26.dp)
                     )
                 }
 
