@@ -40,8 +40,16 @@ jobs:
       - name: Grant Execute Permissions for Gradle Wrapper
         run: chmod +x gradlew
 
-      - name: Setup Environment Files
+      - name: Setup Keystore & Environment Files
         run: |
+          # 1. Restore debug.keystore required by app/build.gradle.kts debugConfig
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f debug.keystore ]; then
+            keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          # 2. Prepare environment variables file (.env)
           if [ ! -f .env ]; then
             if [ -f .env.example ]; then
               cp .env.example .env
@@ -57,10 +65,8 @@ jobs:
       - name: Build Release APK
         if: ${{ github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'both' || startsWith(github.ref, 'refs/tags/v') }}
         run: |
-          # If no custom release keystore is provided, use the debug keystore for signing
-          export KEYSTORE_PATH="${HOME}/.android/debug.keystore"
-          mkdir -p "${HOME}/.android"
-          keytool -genkey -v -keystore "${KEYSTORE_PATH}" -alias upload -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Sandman, OU=Dev, O=Sandman, L=Unknown, S=Unknown, C=US" || true
+          # Use generated or restored debug.keystore for release signing if no custom upload key is provided
+          export KEYSTORE_PATH="${PWD}/debug.keystore"
           export STORE_PASSWORD="android"
           export KEY_PASSWORD="android"
           ./gradlew assembleRelease --stacktrace
