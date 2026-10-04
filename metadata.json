@@ -1,0 +1,6 @@
+{
+  "name": "Sandman",
+  "description": "Non-rooted Android app virtualization, sandbox container, and telemetry spoofing suite.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

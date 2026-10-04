@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Sandman</string>
+    <string name="sandbox_title">Sandman Virtual Container</string>
+    <string name="sandbox_tagline">Non-Rooted Virtual Environment &amp; Hook Engine</string>
+</resources>
