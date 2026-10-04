@@ -1,0 +1,94 @@
+name: Build Sandman Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Select build variant'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+          - both
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Package APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant Execute Permissions for Gradle Wrapper
+        run: chmod +x gradlew
+
+      - name: Setup Environment Files
+        run: |
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+
+      - name: Build Debug APK
+        if: ${{ github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both' || github.event.inputs.build_type == '' || github.event_name == 'push' || github.event_name == 'pull_request' }}
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Build Release APK
+        if: ${{ github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'both' || startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          # If no custom release keystore is provided, use the debug keystore for signing
+          export KEYSTORE_PATH="${HOME}/.android/debug.keystore"
+          mkdir -p "${HOME}/.android"
+          keytool -genkey -v -keystore "${KEYSTORE_PATH}" -alias upload -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Sandman, OU=Dev, O=Sandman, L=Unknown, S=Unknown, C=US" || true
+          export STORE_PASSWORD="android"
+          export KEY_PASSWORD="android"
+          ./gradlew assembleRelease --stacktrace
+
+      - name: Prepare Artifacts Directory
+        run: |
+          mkdir -p output_apks
+          find app/build/outputs/apk/ -name "*.apk" -exec cp {} output_apks/ \;
+          ls -la output_apks/
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sandman-APK-Package
+          path: output_apks/*.apk
+          retention-days: 30
+
+      - name: Create GitHub Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output_apks/*.apk
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## Sandman Virtual Container & Spoofing Engine
+            Automated Android APK build from GitHub Actions.
+            - **Variant**: Debug & Release APKs attached below.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
