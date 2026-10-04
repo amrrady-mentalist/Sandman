@@ -320,7 +320,14 @@ fun SandboxHubScreen(
                 app = app,
                 onLaunch = {
                     MockLocationEngine.startSpoofing(context, config)
-                    VirtualContainer.launchApp(context, app)
+                    val launchIntent = context.packageManager.getLaunchIntentForPackage(app.packageName)
+                    if (launchIntent != null) {
+                        launchIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(launchIntent)
+                        installStatusMessage = "Opened ${app.appName} with active spoofing!"
+                    } else {
+                        VirtualContainer.launchApp(context, app)
+                    }
                 },
                 onDelete = {
                     VirtualContainer.deleteApp(context, app.packageName)

@@ -2,6 +2,7 @@ package com.example.sandman.component
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.content.res.Resources
 import android.location.Location
 import android.location.LocationManager
@@ -14,6 +15,7 @@ import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -48,6 +50,7 @@ import com.example.sandman.inspector.VirtualLogBus
 import com.example.sandman.model.HookCategory
 import com.example.sandman.model.HookLogEntry
 import com.example.sandman.model.SandboxConfig
+import com.example.sandman.service.MockLocationEngine
 import com.example.sandman.ui.theme.SandmanTheme
 import kotlinx.coroutines.delay
 import java.io.File
@@ -971,7 +974,7 @@ fun TimeTravelBtn(label: String, onClick: () -> Unit) {
 }
 
 /**
- * 4. THIRD-PARTY / INSTALLED APK HOST INTERACTION VIEW
+ * 4. TARGET APPLICATION RUNNER & LIVE CONTROLLER
  */
 @Composable
 fun ApkHostView(
@@ -982,145 +985,210 @@ fun ApkHostView(
     config: SandboxConfig,
     onUpdateConfig: (SandboxConfig) -> Unit
 ) {
-    var testResult by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    val isInstalled = remember(targetPackage) {
+        context.packageManager.getLaunchIntentForPackage(targetPackage) != null
+    }
+    var launchMessage by remember { mutableStateOf<String?>(null) }
+    var isWalking by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isWalking) {
+        if (isWalking) {
+            while (isWalking) {
+                delay(1500)
+                val newLat = config.fakeLatitude + 0.0003
+                val newLng = config.fakeLongitude + 0.0003
+                val updated = config.copy(fakeLatitude = newLat, fakeLongitude = newLng)
+                onUpdateConfig(updated)
+                MockLocationEngine.updateCoordinates(context, newLat, newLng)
+            }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Hero Launch Card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF102338)),
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF00F5D4))
+            ) {
+                Column(modifier = Modifier.padding(18.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF00F5D4).copy(alpha = 0.2f))
+                                .border(1.dp, Color(0xFF00F5D4), RoundedCornerShape(12.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Android, contentDescription = null, tint = Color(0xFF00F5D4), modifier = Modifier.size(28.dp))
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(appName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
+                            Text(targetPackage, fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color(0xFF00F5D4))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Active Spoof Indicators
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF08121E), RoundedCornerShape(8.dp))
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text("SPOOFED GPS", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.Gray)
+                            Text("${String.format(Locale.US, "%.4f", config.fakeLatitude)}°, ${String.format(Locale.US, "%.4f", config.fakeLongitude)}°", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = Color(0xFF00F5D4), fontSize = 12.sp)
+                        }
+                        Column {
+                            Text("TIME LOCK", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color.Gray)
+                            Text(if (config.isTimeFrozen) "Frozen Clock" else "Drifting", fontWeight = FontWeight.Bold, color = if (config.isTimeFrozen) Color(0xFFFF0054) else Color(0xFF70E000), fontSize = 12.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    if (isInstalled) {
+                        // Button to directly launch the real application
+                        Button(
+                            onClick = {
+                                MockLocationEngine.startSpoofing(context, config)
+                                val intent = context.packageManager.getLaunchIntentForPackage(targetPackage)
+                                if (intent != null) {
+                                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    context.startActivity(intent)
+                                    launchMessage = "Opened $appName with active mock GPS!"
+                                } else {
+                                    launchMessage = "Could not open $appName"
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00F5D4)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                        ) {
+                            Icon(Icons.Default.Launch, contentDescription = null, tint = Color(0xFF080F1A), modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Open $appName with Spoofed GPS & Time", color = Color(0xFF080F1A), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    } else {
+                        // Button to install APK to phone via FileProvider
+                        Button(
+                            onClick = {
+                                try {
+                                    val apkFile = File(apkPath)
+                                    if (apkFile.exists()) {
+                                        MockLocationEngine.startSpoofing(context, config)
+                                        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", apkFile)
+                                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                                            setDataAndType(uri, "application/vnd.android.package-archive")
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(intent)
+                                        launchMessage = "Android Package Installer opened. Complete install to use $appName!"
+                                    } else {
+                                        launchMessage = "APK file not found at $apkPath"
+                                    }
+                                } catch (e: Exception) {
+                                    launchMessage = "Install error: ${e.message}"
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00F5D4)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp)
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, tint = Color(0xFF080F1A), modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Install $appName to Phone & Use", color = Color(0xFF080F1A), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    }
+
+                    if (launchMessage != null) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(launchMessage ?: "", color = Color(0xFF00F5D4), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+
+        // Live Motion Joystick Card so user can move GPS live while using the target app
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF142438)),
                 shape = RoundedCornerShape(16.dp)
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(appName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color.White)
-                    Text("Package: $targetPackage", fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = Color(0xFF00F5D4))
-                    Spacer(modifier = Modifier.height(10.dp))
+                Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.SportsEsports, contentDescription = null, tint = Color(0xFF00F5D4))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Live GPS Movement Controller", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        "This application runs inside the Sandman isolated container with ContextWrapper storage redirection and dynamic binder proxying.",
-                        fontSize = 11.sp,
-                        color = Color(0xFF94A3B8)
+                        "Use this controller to move your GPS location in real-time while using $appName.",
+                        color = Color.Gray,
+                        fontSize = 11.sp
                     )
-                }
-            }
-        }
 
-        item {
-            Text("Interactive Runtime Probes", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 13.sp)
-            Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
 
-            // Action: Query Location as seen by the app
-            InteractiveActionCard(
-                title = "Query Location as Target App",
-                desc = "Invokes VirtualContext.getSystemService(LOCATION_SERVICE).getLastKnownLocation()",
-                buttonText = "Execute Probe"
-            ) {
-                try {
-                    val lm = virtualContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-                    val loc = lm?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                    testResult = "Location Received by Target:\nLat: ${loc?.latitude}°\nLng: ${loc?.longitude}°\nAccuracy: ${loc?.accuracy}m\nProvider: ${loc?.provider}\nisMock: ${loc?.isFromMockProvider}"
-                } catch (e: Exception) {
-                    testResult = "Error querying Location: ${e.message}"
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Action: Write Private Silo File
-            InteractiveActionCard(
-                title = "Verify Storage Silo Isolation",
-                desc = "Writes an isolated text file into ${virtualContext.filesDir.name}",
-                buttonText = "Test Private Write"
-            ) {
-                try {
-                    val f = File(virtualContext.filesDir, "sandboxed_doc_${System.currentTimeMillis()}.txt")
-                    f.writeText("Data created inside Sandman Container: Lat=${config.fakeLatitude}, Carrier=${config.spoofedCarrier}")
-                    testResult = "Success: Wrote private file:\n${f.absolutePath}\nSize: ${f.length()} bytes"
-                } catch (e: Exception) {
-                    testResult = "Storage error: ${e.message}"
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Action: Check Telephony Identity
-            InteractiveActionCard(
-                title = "Read Telephony Identity",
-                desc = "Queries VirtualContext.getSystemService(TELEPHONY_SERVICE)",
-                buttonText = "Query SIM / IMEI"
-            ) {
-                try {
-                    val tm = virtualContext.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
-                    testResult = "Telephony Identity Seen by Target:\nCarrier: ${tm?.simOperatorName ?: config.spoofedCarrier}\nIMEI: ${config.spoofedImei}\nNet: ${config.spoofedNetworkType}\nISO: ${config.spoofedCountryIso.uppercase()}"
-                } catch (e: Exception) {
-                    testResult = "Telephony error: ${e.message}"
-                }
-            }
-        }
-
-        if (testResult != null) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF0F2034)),
-                    shape = RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF00F5D4))
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Execution Output", fontWeight = FontWeight.Bold, color = Color(0xFF00F5D4), fontSize = 12.sp)
-                            Spacer(modifier = Modifier.weight(1f))
-                            IconButton(onClick = { testResult = null }, modifier = Modifier.size(20.dp)) {
-                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.Gray, modifier = Modifier.size(14.dp))
+                    // D-Pad
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        JoystickButton("▲ North") {
+                            val newLat = config.fakeLatitude + 0.0005
+                            val updated = config.copy(fakeLatitude = newLat)
+                            onUpdateConfig(updated)
+                            MockLocationEngine.updateCoordinates(context, newLat, config.fakeLongitude)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            JoystickButton("◄ West") {
+                                val newLng = config.fakeLongitude - 0.0005
+                                val updated = config.copy(fakeLongitude = newLng)
+                                onUpdateConfig(updated)
+                                MockLocationEngine.updateCoordinates(context, config.fakeLatitude, newLng)
+                            }
+                            Button(
+                                onClick = { isWalking = !isWalking },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isWalking) Color(0xFFFF0054) else Color(0xFF00F5D4)
+                                ),
+                                modifier = Modifier.height(42.dp)
+                            ) {
+                                Text(if (isWalking) "Stop Walk" else "Auto-Walk", color = Color(0xFF080F1A), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                            JoystickButton("East ►") {
+                                val newLng = config.fakeLongitude + 0.0005
+                                val updated = config.copy(fakeLongitude = newLng)
+                                onUpdateConfig(updated)
+                                MockLocationEngine.updateCoordinates(context, config.fakeLatitude, newLng)
                             }
                         }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = testResult ?: "",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            color = Color.White
-                        )
+                        JoystickButton("▼ South") {
+                            val newLat = config.fakeLatitude - 0.0005
+                            val updated = config.copy(fakeLatitude = newLat)
+                            onUpdateConfig(updated)
+                            MockLocationEngine.updateCoordinates(context, newLat, config.fakeLongitude)
+                        }
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-fun InteractiveActionCard(
-    title: String,
-    desc: String,
-    buttonText: String,
-    onAction: () -> Unit
-) {
-    Surface(
-        color = Color(0xFF142438),
-        shape = RoundedCornerShape(12.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF1E3A5F)),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 12.sp)
-                Text(desc, color = Color.Gray, fontSize = 10.sp)
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Button(
-                onClick = onAction,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00F5D4)),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                modifier = Modifier.height(34.dp)
-            ) {
-                Text(buttonText, color = Color(0xFF080F1A), fontWeight = FontWeight.Bold, fontSize = 11.sp)
             }
         }
     }
